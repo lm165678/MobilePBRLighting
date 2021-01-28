@@ -120,14 +120,23 @@ MaterialDef PBR Lighting {
         Boolean BackfaceShadows : false
 
         // Mobile PBR
+        Texture2D integrateBRDF
         // Approx Specular + Approx IndirectLight
-        Boolean Pattern1 : true
+        Boolean Pattern1 : false
         // Approx Specular + Approx IBL
         Boolean Pattern2 : false
         // NormalizedBlinnPhong + Approx IndirectLight
         Boolean Pattern3 : false
         // NormalizedBlinnPhong + Approx IBL
         Boolean Pattern4 : false
+        // Mobile PBR op3
+        Boolean Pattern5 : false
+        Float RoughnessLod : 8.0
+        Boolean SpecularMode1 : false
+        Boolean SpecularMode2 : false
+        Boolean LowQuality : false
+        Boolean Nonmetal : false
+        Boolean Fullyrough : false
     }
 
     Technique {
@@ -171,10 +180,18 @@ MaterialDef PBR Lighting {
             NUM_MORPH_TARGETS: NumberOfMorphTargets
             NUM_TARGETS_BUFFERS: NumberOfTargetsBuffers
             HORIZON_FADE: HorizonFade
+            LUT_BRDF : integrateBRDF
             PATTERN1 : Pattern1
             PATTERN2 : Pattern2
             PATTERN3 : Pattern3
             PATTERN4 : Pattern4
+            PATTERN5 : Pattern5
+            ROUGHNESSLOD : RoughnessLod
+            SPECULARMODE1 : SpecularMode1
+            SPECULARMODE2 : SpecularMode2
+            LOWQUALITY : LowQuality
+            NONMETAL : Nonmetal
+            FULLYROUGH : Fullyrough
         }
     }
 

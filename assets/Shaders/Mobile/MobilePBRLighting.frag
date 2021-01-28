@@ -94,7 +94,12 @@ varying lvec3 wNormal;
 #ifdef DISCARD_ALPHA
   uniform lfloat m_AlphaDiscardThreshold;
 #endif
-//------------------------------------------------------Moblie PBR--------------------------------------------------------
+//------------------------------------------------------Mobile PBR--------------------------------------------------------
+// The mobile terminal uses sampling lut, which is faster than real-time fitting BRDF
+#ifdef LUT_BRDF
+  uniform sampler2D integrateBRDF;
+#endif
+
 // Unity3D optimizing LH
 // http://filmicworlds.com/blog/optimizing-ggx-shaders-with-dotlh/
 lvec2 LightingFuncGGX_FV(lfloat dotLH, lfloat roughness)
@@ -228,7 +233,8 @@ lfloat D_NormalizedBlinnPhong( lfloat ndoth, lfloat specularRoughness ){
     return distribution;
 }
 // D,Approx
-// https://www.unrealengine.com/zh-CN/blog/physically-based-shading-on-mobile
+// https://www.unrealengine.com/en-US/blog/physically-based-shading-on-mobile
+// rdotl = reflection.dot(lightDir);
 lfloat D_Approx( lfloat roughness, lfloat rdotl ){
     lfloat a = roughness * roughness;
     lfloat a2 = a * a;
@@ -246,14 +252,14 @@ lfloat FV_NormalizedBlinnPhong( lfloat ldoth ){
 // direct Specular BRDF
 // The Blinn-Phong Normalization Zoo
 // http://www.thetenthplanet.de/archives/255
-lvec3 NormalizedBlinnPhongBRDF( lfloat ndoth, lfloat ldoth, lfloat specularRoughness, lvec3 specularColor ){
+lvec3 NormalizedBlinnPhongBRDF( lfloat rdotl, lfloat ldoth, lfloat specularRoughness, lvec3 specularColor ){
     //lfloat D = D_NormalizedBlinnPhong( ndoth, specularRoughness );
-    lfloat D = D_Approx( specularRoughness, ndoth );
+    lfloat D = D_Approx( specularRoughness, rdotl );
     lfloat FV = FV_NormalizedBlinnPhong( ldoth );
     return D * FV * specularColor;
 }
 // indirectSpecular BRDF
-// https://www.unrealengine.com/zh-CN/blog/physically-based-shading-on-mobile
+// https://www.unrealengine.com/en-US/blog/physically-based-shading-on-mobile
 lvec3 IndirectMobileEnvBRDFApprox(lvec3 specularColor, lfloat ndotv, lfloat roughness){
     const lvec4 c0 = lvec4( -1.0f, -0.0275f, -0.572f, 0.022f );
     const lvec4 c1 = lvec4( 1.0f, 0.0425f, 1.04f, -0.04f );
@@ -262,6 +268,69 @@ lvec3 IndirectMobileEnvBRDFApprox(lvec3 specularColor, lfloat ndotv, lfloat roug
     lvec2 AB = lvec2( -1.04f, 1.04f ) * a004 + r.zw;
     lvec3 F_L = specularColor * AB.x + AB.y;
     return F_L;
+}
+// This is true for a typical nonmetal. In this case we can further optimize the function.
+// https://www.unrealengine.com/en-US/blog/physically-based-shading-on-mobile
+lfloat EnvBRDFApproxNonmetal( lfloat roughness, lfloat ndotv ){
+    const lvec2 c0 = lvec2( -1.0f, -0.0275f );
+    const lvec2 c1 = lvec2( 1.0f, 0.0425f );
+    lvec2 r = lvec2( roughness ) * c0 + c1;
+    return min( r.x + r.x, exp2( -9.28f * ndotv ) ) * r.x + r.y;
+}
+// For completely rough objects, it means that specular reflection is not required and SpecularIBL can be avoided, which means the following:
+// EnvBRDFApprox( SpecularColor, 1, 1 ) == SpecularColor * 0.4524 - 0.0024
+// The final simplification is further:DiffuseColor += SpecularColor * 0.45;
+lfloat EnvBRDFApproxFullyrough( lfloat ndotv ){
+    // const lvec2 c0 = lvec2( -1.0f, -0.0275f );
+    // const lvec2 c1 = lvec2( 1.0f, 0.0425f );
+    // lvec2 r = lvec2( roughness ) * c0 + c1;
+    return min( 0.0f, exp2( -9.28f * ndotv ) ) + 0.015f;
+}
+void Mobile_PBR_ComputeDirectLightOp5(lfloat ndotv, lfloat fZero, lvec3 normal, lvec3 lightDir, lvec3 viewDir,
+                           lvec3 lightColor, lfloat roughness,
+                           out lvec3 outDiffuse, out lvec3 outSpecular){
+    // Compute halfway vector.
+    lvec3 halfVec = normalize(lightDir + viewDir);
+
+    // Compute ndotl, ndoth,  vdoth terms which are needed later.
+    lfloat ndotl = max( dot(normal,   lightDir), 0.0f);
+    lfloat ndoth = max( dot(normal,   halfVec),  0.0f);
+    lfloat hdotv = max( dot(viewDir,  halfVec),  0.0f);
+
+
+    // Compute diffuse using energy-conserving Lambert.
+    // Alternatively, use Oren-Nayar for really rough
+    // materials or if you have lots of processing power ...
+    outDiffuse = lvec3(ndotl) * lightColor;
+
+    //D, GGX normaal Distribution function
+    const lfloat D = invPI;
+
+/*
+    // F,G
+    lfloat ldoth = max( dot(lightDir, halfVec),  0.0f);
+    lvec2 FV_helper = LightingFuncGGX_FV(ldoth,roughness);
+    lfloat FV = fZero*FV_helper.x + (1.0f-fZero)*FV_helper.y;
+    lfloat specular = ldoth * D * FV;
+*/
+
+    // Compute Fresnel function via Schlick's approximation.
+    lfloat fresnel = fZero + ( 1.0f - fZero ) * pow( 2.0f, (-5.55473f * hdotv - 6.98316f) * hdotv);
+
+
+    //G Shchlick GGX Gometry shadowing term,  k = alpha/2
+    const lfloat k = 0.5f;
+
+    // UE4 way to optimise shlick GGX Gometry shadowing term
+    //http://graphicrants.blogspot.co.uk/2013/08/specular-brdf-reference.html
+    lfloat G_V = ndotv + sqrt( (ndotv - ndotv * k) * ndotv + k );
+    lfloat G_L = ndotl + sqrt( (ndotl - ndotl * k) * ndotl + k );    
+    // the max here is to avoid division by 0 that may cause some small glitches.
+    lfloat G = 1.0f / max( G_V * G_L ,0.01f); 
+
+    lfloat specular = D * G * ndotl;
+
+    outSpecular = lvec3(specular) * lightColor;
 }
 // use Approx Specular BRDF
 void Mobile_PBR_ComputeDirectLightOp1(lvec3 normal, lvec3 lightDir, lvec3 viewDir,
@@ -305,17 +374,103 @@ void Mobile_PBR_ComputeDirectLightOp2(lvec3 normal, lvec3 lightDir, lvec3 viewDi
     // Compute halfway vector.
     lvec3 halfVec = normalize(lightDir + viewDir);
 
-    // Compute ndotl, ndoth,  vdoth terms which are needed later.
+    // Compute ndotl, rdotl,  vdoth terms which are needed later.
+    lvec3 rv = reflect(-viewDir.xyz, normal.xyz);
     lfloat ndotl = max( dot(normal,   lightDir), 0.0f);
-    lfloat ndoth = max( dot(normal,   halfVec),  0.0f);
+    lfloat rdotl = max( dot(rv,   lightDir),  0.0f);
     lfloat hdotv = max( dot(viewDir,  halfVec),  0.0f);
     lfloat ldoth = max( dot(lightDir,  halfVec),  0.0f);
 
     lfloat fresnel = fZero + ( 1.0f - fZero ) * pow( 2.0f, (-5.55473f * hdotv - 6.98316f) * hdotv);
     lfloat kd = (1.0f - fresnel ) * ( 1.0f - metallic );
     outDiffuse = lvec3( LamberPi( ndotl ) * kd );
-    lvec3 specularBRDF = NormalizedBlinnPhongBRDF( ndoth, ldoth, roughness, specularColor);
+    lvec3 specularBRDF = NormalizedBlinnPhongBRDF( rdotl, ldoth, roughness, specularColor);
     outSpecular = specularBRDF;
+}
+#ifndef MOBILE_GGX_USE_FP16
+    #define MOBILE_GGX_USE_FP16 1
+#endif
+
+#define MEDIUMP_FLT_MAX    65504.0
+#define MEDIUMP_FLT_MIN    0.00006103515625
+#define INV_FG             0.0625
+
+#if MOBILE_GGX_USE_FP16
+    #define saturateMediump(x) min(x, MEDIUMP_FLT_MAX)
+#else
+    #define saturateMediump(x) (x)
+#endif
+// UnrealEngine4
+lfloat GGX_Mobile(lfloat Roughness, lfloat NoH, lvec3 H, lvec3 N)
+{
+
+    #if MOBILE_GGX_USE_FP16
+        lvec3 NxH = cross( N, H );
+        lfloat OneMinusNoHSqr = dot( NxH, NxH );
+    #else
+        lfloat OneMinusNoHSqr = 1.0 - NoH * NoH;
+    #endif
+
+    lfloat a = Roughness * Roughness;
+    lfloat n = NoH * a;
+    lfloat p = a / (OneMinusNoHSqr + n * n);
+    lfloat d = p * p * invPI;
+    return saturateMediump(d);
+}
+#ifdef ROUGHNESSLOD
+    uniform lfloat m_RoughnessLod;
+#endif
+void Mobile_PBR_ComputeDirectLightOp3(lvec3 normal, lvec3 lightDir, lvec3 viewDir,
+                         lvec3 lightColor, lfloat roughness,
+                         out lvec3 outDiffuse, out lvec3 outSpecular){
+    // Compute halfway vector.
+    lvec3 halfVec = normalize(lightDir + viewDir);
+    lfloat ndotl = max( dot(normal,   lightDir), 0.0f);
+    lfloat ndoth = max( dot(normal,   halfVec),  0.0f);
+    lvec3 nxh = cross( normal, halfVec );
+    lfloat OneMinusNoHSqr = dot( nxh, nxh );
+    
+    // diffuse Lambert BRDF
+    outDiffuse = lvec3(ndotl) * lightColor;
+    
+    // spercular BRDF,D
+    lfloat alpha = roughness * roughness;
+    lfloat n = ndoth * alpha;
+    lfloat p = alpha / ( OneMinusNoHSqr + n * n );
+    lfloat D = saturateMediump( p * p );
+    // specular BRDF(f(x) = (roughness * 0.25f + 0.25f) * D
+    // lfloat specular = (roughness * specularAttn + specularAttn) * D;
+    // FG model:G = Vis_SmithJointApprox ,F = F_Schlick
+    // if n = l = v
+    // G = 0.5 / rcp(v_smith_V + v_smithL) = 0.5/2 = 0.25
+    // F = 50 * SpecularColor.g * Fc + (1 -Fc) * SpecularColor = SpecularColor ,(Fc=0)
+    // G*F/4(n.l)(n.v) = G * F /4 = SpecularColor/16
+    // specularBRDF = D * F * G / 4(n.l)(n.v) = D / 16.0f
+    lfloat specular = D * INV_FG;
+    outSpecular = lvec3(specular) * lightColor;
+}
+lfloat BlinnPhongSpecularBRDFs(lfloat f0, lfloat hdotv){
+    return f0 + ( 1.0f - f0 ) * pow( ( 1.0f - hdotv ), 5.0f );
+}
+void Mobile_PBR_ComputeDirectLightOp4(lvec3 normal, lvec3 lightDir, lvec3 viewDir,
+                         lvec3 lightColor, lfloat roughness,
+                         out lvec3 outDiffuse, out lvec3 outSpecular){
+    // Blinn-Phong based BRDF
+    // p = Rd/pi(1 - F0) + (0.0397436n + 0.0856832)Fspec(F0)(N.H)^n/max(N.L,N.E)
+    // Fspec(F0) = F0 + (1 - F0)(1 - E.H)^5
+    lvec3 halfVec = normalize(lightDir + viewDir);
+    lfloat ndotl = max( dot(normal,   lightDir), 0.0f);
+    lfloat ndoth = max( dot(normal,   halfVec),  0.0f);
+    lfloat ndotv = max( dot(viewDir,  normal),  0.0f);
+    lfloat hdotv = max( dot(viewDir,  halfVec),  0.0f);
+    
+    lfloat fresnel = 0.04f;
+    outDiffuse = lvec3( invPI * ( 1.0f - fresnel ) ) * lightColor;
+    
+    lfloat fspec = BlinnPhongSpecularBRDFs( fresnel, hdotv );
+    lfloat shininess = 1.0f - roughness;
+    lfloat specular = ( 0.0397436f * shininess + 0.0856832f ) + fspec * pow( ndoth, shininess ) / max( ndotl, ndotv );
+    outSpecular = lvec3(specular) * lightColor;
 }
 //------------------------------------------------------Moblie PBR--------------------------------------------------------
 
@@ -443,7 +598,7 @@ void main(){
          lightMapColor.gb = lightMapColor.rr;
          ao = lightMapColor;
        #else
-         gl_FragColor.rgb += diffuseColor.rgb * lightMapColor;
+         diffuseColor.rgb *= lightMapColor;
        #endif
        specularColor.rgb *= lightMapColor;
     #endif
@@ -474,17 +629,64 @@ void main(){
         lvec3 directSpecular;
 
         #if ( defined( PATTERN1 ) || defined( PATTERN2 ) )
-            Mobile_PBR_ComputeDirectLightOp1(normal, lightDir.xyz, viewDir,
+            #ifdef FULLYROUGH
+                Mobile_PBR_ComputeDirectLightOp5(ndotv, fZero.x, normal, lightDir.xyz, viewDir,
+                                     lightColor.rgb, Roughness,
+                                     directDiffuse,  directSpecular);
+            #else
+                Mobile_PBR_ComputeDirectLightOp3(normal, lightDir.xyz, viewDir,
+                                 lightColor.rgb, Roughness,
+                                 directDiffuse,  directSpecular);
+            #endif
+            #ifdef SPECULARMODE1
+                lvec3 directLighting = diffuseColor.rgb *directDiffuse + directSpecular * specularColor.rgb;
+            #else
+                #ifdef SPECULARMODE2
+                    lvec3 directLighting = diffuseColor.rgb *directDiffuse + directSpecular * ( Metallic <= 0.2f ? ( Roughness >= 0.5f ? specularColor.rgb : lvec3(1.0f) ) : specularColor.rgb );
+                #else
+                    lvec3 directLighting = diffuseColor.rgb *directDiffuse + directSpecular;
+                #endif
+            #endif
+
+            //lvec3 directLighting = diffuseColor.rgb *directDiffuse + directSpecular * ( Metallic <= 0.2f ? ( Roughness >= 0.5f ? specularColor.rgb : lvec3(1.0f) ) : specularColor.rgb );
+            /*
+            Mobile_PBR_ComputeDirectLightOp3(normal, lightDir.xyz, viewDir,
+                                    lightColor.rgb, Roughness,
+                                    directDiffuse,  directSpecular);
+            lvec3 directLighting = diffuseColor.rgb * directDiffuse + directSpecular * specularColor.rgb;
+            */
+            /*
+            Mobile_PBR_ComputeDirectLightOp4(normal, lightDir.xyz, viewDir,
                              lightColor.rgb, Roughness,
                              directDiffuse,  directSpecular);
-
-            lvec3 directLighting = diffuseColor.rgb *directDiffuse + directSpecular;
+            lvec3 directLighting = diffuseColor.rgb *directDiffuse + directSpecular * specularColor.rgb;
+            */
         #else
             #if ( defined( PATTERN3 ) || defined( PATTERN4 ) )
                 Mobile_PBR_ComputeDirectLightOp2(normal, lightDir.xyz, viewDir,
                                     specularColor.rgb, fZero.x, Roughness, Metallic, ndotv,
                                     directDiffuse,  directSpecular);
                 lvec3 directLighting = ( diffuseColor.rgb * directDiffuse + directSpecular ) * lightColor.rgb;
+            #elif defined( PATTERN5 )
+                #ifdef FULLYROUGH
+                    Mobile_PBR_ComputeDirectLightOp5(ndotv, fZero.x, normal, lightDir.xyz, viewDir,
+                                         lightColor.rgb, Roughness,
+                                         directDiffuse,  directSpecular);
+                #else
+                    Mobile_PBR_ComputeDirectLightOp3(normal, lightDir.xyz, viewDir,
+                                        lightColor.rgb, Roughness,
+                                        directDiffuse,  directSpecular);
+                #endif
+                #ifdef SPECULARMODE1
+                    lvec3 directLighting = diffuseColor.rgb *directDiffuse + directSpecular * specularColor.rgb;
+                #else
+                    #ifdef SPECULARMODE2
+                        lvec3 directLighting = diffuseColor.rgb *directDiffuse + directSpecular * ( Metallic <= 0.2f ? ( Roughness >= 0.5f ? specularColor.rgb : lvec3(1.0f) ) : specularColor.rgb );
+                    #else
+                        lvec3 directLighting = diffuseColor.rgb *directDiffuse + directSpecular;
+                    #endif
+                #endif
+                //lvec3 directLighting = diffuseColor.rgb * directDiffuse + directSpecular * ( Metallic <= 0.2f ? ( Roughness >= 0.5f ? specularColor.rgb : lvec3(1.0f) ) : specularColor.rgb );
             #else
                 Classic_PBR_ComputeDirectLight(normal, lightDir.xyz, viewDir,
                             lightColor.rgb, fZero.x, Roughness, ndotv,
@@ -618,9 +820,41 @@ void main(){
     */
     #if ( defined( PATTERN1 ) || defined( PATTERN3 ) )
         // ApproxEnvBRDF
+        /*
         lvec3 envBRDFApprox = IndirectMobileEnvBRDFApprox( lvec3( Metallic ), ndotv, Roughness );
         lvec3 indirectLighting = diffuseColor.rgb * ao + specularColor.rgb * envBRDFApprox;
         gl_FragColor.rgb = gl_FragColor.rgb + indirectLighting;
+        */
+        
+        #if NB_PROBES >= 1
+            #ifdef LUT_BRDF
+                lvec2 EnvBRDF = texture2D( integrateBRDF, lvec2( Roughness, ndotv ) ).rg;
+                lvec3 envBRDFApprox = lvec3( specularColor.rgb * EnvBRDF.x+ EnvBRDF.y );
+            #else
+                #ifdef NONMETAL
+                    lvec3 envBRDFApprox = lvec3( EnvBRDFApproxNonmetal( Roughness, ndotv ) );
+                #else
+                    #ifdef FULLYROUGH
+                        lvec3 envBRDFApprox = lvec3( EnvBRDFApproxFullyrough( ndotv ) );
+                    #else
+                        // ApproxEnvBRDF
+                        lvec3 envBRDFApprox = IndirectMobileEnvBRDFApprox( lvec3( Metallic ), ndotv, Roughness );
+                    #endif
+                #endif
+            #endif
+            
+            #ifdef LOWQUALITY
+                lvec3 indirectLighting = diffuseColor.rgb * lvec3(0.5f) + specularColor.rgb * envBRDFApprox;
+            #else
+                lvec3 indirectDiffuse = sphericalHarmonics(normal.xyz, g_ShCoeffs) * diffuseColor.rgb;
+                lvec3 indirectLighting = indirectDiffuse + specularColor.rgb * envBRDFApprox;
+            #endif
+            //lvec3 indirectDiffuse = sphericalHarmonics(normal.xyz, g_ShCoeffs) * diffuseColor.rgb;
+            //lvec3 indirectLighting = diffuseColor.rgb * lvec3(0.5f) + specularColor.rgb * envBRDFApprox;
+            //lvec3 indirectLighting = indirectDiffuse + specularColor.rgb * envBRDFApprox;
+            gl_FragColor.rgb = gl_FragColor.rgb + indirectLighting * ao;
+        #endif
+        
     #else
         #if ( defined( PATTERN2 ) || defined( PATTERN4 ) )
             #if NB_PROBES >= 1
@@ -641,6 +875,19 @@ void main(){
                 lvec3 indirectLighting = (diffuseColor.rgb + indirectSpecular * specularColor.rgb) * brdf * ao;
                 gl_FragColor.rgb = gl_FragColor.rgb + indirectLighting * step( 0.0f, g_LightProbeData[3].w);
             #endif
+        #elif ( defined( PATTERN5 ) && NB_PROBES >= 1 )
+            // lfloat brdf = 1.0f;
+            lvec3 rv = reflect(-viewDir.xyz, normal.xyz);
+            
+            // IBL = SamplerCube(Cubemap ,Roughness ) * BRDF * MaterialAO
+            #ifdef LOWQUALITY
+                lvec3 indirectLighting = ( textureCubeLod( g_PrefEnvMap, rv, Roughness * m_RoughnessLod ).rgb * specularColor.rgb + diffuseColor.rgb ) * ao;
+            #else
+                lvec3 indirectDiffuse = sphericalHarmonics(normal.xyz, g_ShCoeffs) * diffuseColor.rgb;
+                lvec3 indirectLighting = ( textureCubeLod( g_PrefEnvMap, rv, Roughness * m_RoughnessLod ).rgb * specularColor.rgb + indirectDiffuse ) * ao;
+            #endif
+            //  * step( 0.0f, g_LightProbeData[3].w)
+            gl_FragColor.rgb = gl_FragColor.rgb + indirectLighting;
         #else
             #if NB_PROBES >= 1
                 lvec3 rv = reflect(-viewDir.xyz, normal.xyz);
@@ -682,7 +929,7 @@ void main(){
     #endif
     gl_FragColor.a = alpha;
     // HDR tonemapping
-    gl_FragColor.rgb = gl_FragColor.rgb / (gl_FragColor.rgb + lvec3(1.0f));
+    // gl_FragColor.rgb = gl_FragColor.rgb / (gl_FragColor.rgb + lvec3(1.0f));
     // gamma correct
     //gl_FragColor.rgb = pow(gl_FragColor.rgb, lvec3(1.0f/2.2f));
    
