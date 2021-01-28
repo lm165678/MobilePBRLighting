@@ -5,4 +5,8 @@ After downloading, put it into your project, select MobilePBRLighting.j3md mater
 If you do not select any of them, it is the standard PBR lighting effect.
 In addition, if necessary, you can replace and modify the default PBR.glsllib, and then integrate it into the default PBRLighting.j3md, or you may need to write your own code to replace PBRLighting.j3md with MobilePBRLighting.j3md for all geometric objects.
 
-# Updated the calculation approximation scheme, Pattern5 is the closest to the standard PBRLighting. On my mobile phone, within a suitable vertex range, the performance is improved by an average of about 15-25 frame rates compared to standard PBRLighting.
+# Update Pattern1
+Improved the approximate scheme, optimized for Nonmetal and FullyRough. Performance is the fastest, but this mode assumes that the object does not require specular reflection, so it cannot be used for rendering that requires environmental reflection.
+
+# Update Pattern5
+Updated the calculation approximation scheme, Pattern5 is the closest to the standard PBRLighting. On my mobile phone, within a suitable vertex range, the performance is improved by an average of about 15-25 frame rates compared to standard PBRLighting.
